@@ -1,0 +1,220 @@
+import sys
+import math
+import numpy as np
+from PyQt5.QtWidgets import QApplication, QMainWindow, QWidget, QVBoxLayout, QLineEdit, QListWidget, QLabel
+from PyQt5.QtCore import Qt
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from PyQt5.QtOpenGL import QGLWidget
+
+class GLWidget(QGLWidget):
+    def __init__(self, parent=None):
+        super(GLWidget, self).__init__(parent)
+        self.neural_points = []
+        self.servo_points = []
+        self.neural_metadata = []
+        self.servo_metadata = []
+        self.angle = 0
+        self.last_mouse_pos = None
+        self.selected_point = None
+
+    def initializeGL(self):
+        glClearColor(0.1, 0.1, 0.1, 1.0)  # Dark background
+        glEnable(GL_BLEND)
+        glBlendFunc(GL_SRC_ALPHA, GL_ONE)  # Additive blending for glow
+        glEnable(GL_POINT_SMOOTH)
+        glEnable(GL_DEPTH_TEST)
+        glPointSize(8.0)
+
+        # Lighting for holographic effect
+        glEnable(GL_LIGHTING)
+        glEnable(GL_LIGHT0)
+        glLightfv(GL_LIGHT0, GL_POSITION, [10, 10, 10, 1])
+        glLightfv(GL_LIGHT0, GL_DIFFUSE, [0, 1, 1, 1])  # Cyan light
+        glEnable(GL_LIGHT1)
+        glLightfv(GL_LIGHT1, GL_AMBIENT, [0.25, 0.25, 0.25, 1])
+
+    def resizeGL(self, w, h):
+        glViewport(0, 0, w, h)
+        glMatrixMode(GL_PROJECTION)
+        glLoadIdentity()
+        gluPerspective(75, w / h if h != 0 else 1, 0.1, 1000)
+        glMatrixMode(GL_MODELVIEW)
+
+    def paintGL(self):
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glLoadIdentity()
+
+        # Camera animation
+        self.angle += 0.2
+        gluLookAt(
+            10 * math.sin(math.radians(self.angle)), 5, 10 * math.cos(math.radians(self.angle)),
+            0, 5, 0, 0, 1, 0
+        )
+
+        # Draw neural points (cyan)
+        glColor4f(0, 1, 1, 0.8)
+        glBegin(GL_POINTS)
+        for p in self.neural_points:
+            glVertex3f(p['x'], p['y'], p['z'])
+        glEnd()
+
+        # Draw servo points (pink)
+        glColor4f(1, 0.2, 0.6, 0.8)
+        glBegin(GL_POINTS)
+        for p in self.servo_points:
+            glVertex3f(p['x'], p['y'], p['z'])
+        glEnd()
+
+        glFlush()
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.last_mouse_pos = event.pos()
+            self.select_point(event.pos())
+            self.update()
+
+    def select_point(self, pos):
+        self.selected_point = None
+        viewport = glGetIntegerv(GL_VIEWPORT)
+        x, y = pos.x(), viewport[3] - pos.y()
+        
+        # Read pixel depth
+        glReadBuffer(GL_FRONT)
+        depth = glReadPixels(x, y, 1, 1, GL_DEPTH_COMPONENT, GL_FLOAT)
+        if depth[0][0] >= 1.0:
+            return
+
+        # Unproject to 3D coordinates
+        modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+        projection = glGetDoublev(GL_PROJECTION_MATRIX)
+        win_pos = gluUnProject(x, y, depth[0][0], modelview, projection, viewport)
+
+        # Find closest point
+        min_dist = float('inf')
+        for i, p in enumerate(self.neural_points):
+            dist = sum((win_pos[j] - p[k]) ** 2 for j, k in enumerate(['x', 'y', 'z']))
+            if dist < min_dist and dist < 0.5:
+                min_dist = dist
+                self.selected_point = ('neural', i)
+        for i, p in enumerate(self.servo_points):
+            dist = sum((win_pos[j] - p[k]) ** 2 for j, k in enumerate(['x', 'y', 'z']))
+            if dist < min_dist and dist < 0.5:
+                min_dist = dist
+                self.selected_point = ('servo', i)
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super(MainWindow, self).__init__()
+        self.setWindowTitle("Apple Silicon Edge CPU with Neural Network")
+        self.resize(800, 600)
+
+        # Main widget and layout
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        layout = QVBoxLayout(central_widget)
+
+        # Summary label
+        self.summary_label = QLabel("Loading solar reactor control data...")
+        self.summary_label.setStyleSheet("color: #0ff; text-shadow: 0 0 3px #0ff;")
+        layout.addWidget(self.summary_label)
+
+        # OpenGL widget
+        self.gl_widget = GLWidget()
+        layout.addWidget(self.gl_widget)
+
+        # Log section
+        log_label = QLabel("Execution Log")
+        log_label.setStyleSheet("color: #0ff; text-shadow: 0 0 5px #0ff; font-size: 16px;")
+        layout.addWidget(log_label)
+
+        # Search bar
+        self.search_bar = QLineEdit()
+        self.search_bar.setPlaceholderText("Search log (e.g., LOAD, 40, Neural, Wi-Fi, Servo, Clicked)")
+        self.search_bar.setStyleSheet("background: #333; color: #fff; border: 1px solid #555; padding: 5px;")
+        self.search_bar.textChanged.connect(self.filter_logs)
+        layout.addWidget(self.search_bar)
+
+        # Log list
+        self.log_list = QListWidget()
+        self.log_list.setStyleSheet("background: #2a2a2a; color: #ccc; border: none;")
+        layout.addWidget(self.log_list)
+
+        # Tooltip label
+        self.tooltip_label = QLabel(self)
+        self.tooltip_label.setStyleSheet("background: rgba(0, 255, 255, 0.2); color: #0ff; border: 1px solid #0ff; padding: 5px; border-radius: 5px; text-shadow: 0 0 3px #0ff;")
+        self.tooltip_label.hide()
+
+        # Simulate data
+        self.log_entries = []
+        self.simulate_data()
+
+        # Connect GL widget signal
+        self.gl_widget.mousePressEvent = self.handle_mouse_press
+
+    def simulate_data(self):
+        self.log_list.clear()
+        self.gl_widget.neural_points.clear()
+        self.gl_widget.servo_points.clear()
+        self.gl_widget.neural_metadata.clear()
+        self.gl_widget.servo_metadata.clear()
+        self.log_entries.clear()
+
+        for temp in range(0, 251, 10):
+            # Simulate neural efficiency
+            efficiency = max(0, 800 - 0.02 * (temp - 100) ** 2 + (np.random.random() * 50 - 25))
+            self.gl_widget.neural_points.append({'x': (temp / 25) - 5, 'y': efficiency / 100, 'z': 0})
+            self.gl_widget.neural_metadata.append({'temp': temp, 'efficiency': efficiency, 'cycle': temp / 10})
+
+            # Simulate servo angle
+            angle = abs(90 + 90 * math.sin(temp * math.pi / 180)) + (np.random.random() * 10 - 5)
+            self.gl_widget.servo_points.append({'x': (temp / 25) - 5, 'y': efficiency / 100, 'z': (angle / 60) - 1.5})
+            self.gl_widget.servo_metadata.append({'temp': temp, 'efficiency': efficiency, 'angle': angle, 'cycle': temp / 10})
+
+            # Log entry
+            log_entry = f"Cycle {temp/10}: Temp={temp}°C, Efficiency={efficiency:.1f} units, Servo Angle={angle:.1f}°"
+            self.log_entries.append(log_entry)
+            self.log_list.addItem(log_entry)
+
+        # Update summary
+        max_efficiency = max(p['y'] * 100 for p in self.gl_widget.neural_points)
+        max_angle = max((p['z'] + 1.5) * 60 for p in self.gl_widget.servo_points)
+        self.summary_label.setText(f"Simulated {len(self.gl_widget.neural_points)} cycles. Max Efficiency: {max_efficiency:.1f} units. Max Servo Angle: {max_angle:.1f}°.")
+
+        self.gl_widget.update()
+
+    def filter_logs(self):
+        query = self.search_bar.text().lower()
+        self.log_list.clear()
+        for entry in self.log_entries:
+            if query in entry.lower():
+                self.log_list.addItem(entry)
+
+    def handle_mouse_press(self, event):
+        super(GLWidget, self.gl_widget).mousePressEvent(event)
+        if self.gl_widget.selected_point:
+            point_type, index = self.gl_widget.selected_point
+            metadata = (self.gl_widget.neural_metadata if point_type == 'neural' else self.gl_widget.servo_metadata)[index]
+            
+            # Show tooltip
+            tooltip_text = f"Cycle {metadata['cycle']}: Temp={metadata['temp']}°C, Efficiency={metadata['efficiency']:.1f} units"
+            if point_type == 'servo':
+                tooltip_text += f", Servo Angle={metadata['angle']:.1f}°"
+            self.tooltip_label.setText(tooltip_text)
+            self.tooltip_label.move(event.pos().x() + 10, event.pos().y() + 10)
+            self.tooltip_label.show()
+
+            # Add log entry
+            log_entry = f"Clicked {point_type} point at Cycle {metadata['cycle']}: Temp={metadata['temp']}°C, Efficiency={metadata['efficiency']:.1f} units"
+            if point_type == 'servo':
+                log_entry += f", Servo Angle={metadata['angle']:.1f}°"
+            self.log_entries.append(log_entry)
+            self.log_list.addItem(log_entry)
+        else:
+            self.tooltip_label.hide()
+
+if __name__ == '__main__':
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec_())
