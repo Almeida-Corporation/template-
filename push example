@@ -1,0 +1,224 @@
+import React, { useState, useEffect } from 'react';import { View, Text, TextInput, Button, StyleSheet, Alert } from 'react-native';import { simplify, solve, parse } from 'mathjs';import * as Notifications from 'expo-notifications';
+// Types for type safetyexport interface EquationSolution {  variable: string;  value: number | string | null;  steps: string[];  warnings?: string[];  logId?: string;}
+export interface SolverOptions {  variableToSolveFor: string;  precision?: number;  enableNotifications?: boolean;}
+interface LogEntry {  id: string;  equation: string;  variable: string;  timestamp: number;  solution: EquationSolution;}
+// Notification setupasync function setupNotifications() {  const { status } = await Notifications.requestPermissionsAsync();  if (status !== 'granted') {    Alert.alert('Notification permission not granted');    return false;  }  return true;}
+// Linear log mapping utilityclass LogMapper {  private static logs: LogEntry[] = [];  private static maxLogs = 100;
+  static addLog(equation: string, variable: string, solution: EquationSolution): string {    const id = ${Date.now()}-${Math.random().toString(36).substr(2, 9)};    this.logs.push({      id,      equation,      variable,      timestamp: Date.now(),      solution    });
+// Keep only the latest maxLogs entries
+if (this.logs.length > this.maxLogs) {
+  this.logs = this.logs.slice(-this.maxLogs);
+}
+
+return id;
+
+  }
+  static getLogIndex(timestamp: number): number {    // Linear mapping: newer logs have higher indices    const minTimestamp = this.logs[0]?.timestamp || timestamp;    const maxTimestamp = this.logs[this.logs.length - 1]?.timestamp || timestamp;
+if (maxTimestamp === minTimestamp) return this.logs.length - 1;
+
+return Math.floor(
+  ((timestamp - minTimestamp) / (maxTimestamp - minTimestamp)) * (this.logs.length - 1)
+);
+
+  }
+  static getLog(id: string): LogEntry | undefined {    return this.logs.find(log => log.id === id);  }}
+// Core solver logicexport class EquationSolverCore {  static async solveEquation(equation: string, options: SolverOptions): Promise {    try {      const { variableToSolveFor, precision = 6, enableNotifications = true } = options;      const steps: string[] = [];      const warnings: string[] = [];
+  // Parse equation
+  const parsed = parse(equation);
+  steps.push(`Parsed equation: ${parsed.toString()}`);
+
+  // Check if equation is valid
+  if (!parsed.isOperatorNode && !parsed.isSymbolNode) {
+    throw new Error('Invalid equation format');
+  }
+
+  // Attempt to simplify by dividing common terms
+  const simplified = simplify(equation);
+  steps.push(`Simplified: ${simplified.toString()}`);
+
+  // Solve for the variable
+  let solution;
+  try {
+    solution = solve(simplified, variableToSolveFor);
+  } catch (e) {
+    // Handle edge cases (e.g., division by zero)
+    if (equation.includes('=') && simplified.toString() === '0 = 0') {
+      warnings.push(`Equation is true for all ${variableToSolveFor} (identity)`);
+      const result = {
+        variable: variableToSolveFor,
+        value: 'Any value',
+        steps,
+        warnings,
+      };
+      await this.notifySolution(equation, result, enableNotifications);
+      return result;
+    }
+    throw e;
+  }
+
+  // Format solution
+  const value = typeof solution === 'number' ? Number(solution.toFixed(precision)) : solution.toString();
+  steps.push(`Solution: ${variableToSolveFor} = ${value}`);
+
+  const result = {
+    variable: variableToSolveFor,
+    value,
+    steps,
+    warnings,
+    logId: LogMapper.addLog(equation, variableToSolveFor, { variable: variableToSolveFor, value, steps, warnings })
+  };
+
+  await this.notifySolution(equation, result, enableNotifications);
+  return result;
+} catch (error) {
+  throw new Error(`Solver error: ${error.message}`);
+}
+
+  }
+  private static async notifySolution(equation: string, solution: EquationSolution, enableNotifications: boolean) {    if (!enableNotifications) return;
+await Notifications.scheduleNotificationAsync({
+  content: {
+    title: 'Equation Solved!',
+    body: `Solution for ${equation}: ${solution.variable} = ${solution.value}`,
+    data: { logId: solution.logId }
+  },
+  trigger: null
+});
+
+  }}
+// Reusable UI component for equation inputexport const EquationInput: React.FC<{  onSubmit: (equation: string, variable: string) => void;}> = ({ onSubmit }) => {  const [equation, setEquation] = useState('');  const [variable, setVariable] = useState('');  const [notificationStatus, setNotificationStatus] = useState('Checking...');
+  useEffect(() => {    setupNotifications().then(granted => {      setNotificationStatus(granted ? 'Notifications enabled' : 'Notifications disabled');    });  }, []);
+  return (          {notificationStatus}                  <Button        title="Solve"        onPress={() => onSubmit(equation, variable)}      />      );};
+// Reusable UI component for displaying solutionexport const SolutionDisplay: React.FC<{ solution: EquationSolution | null; error?: string }> = ({ solution, error }) => {  if (error) {    return (              Error: {error}          );  }
+  if (!solution) {    return null;  }
+  const logIndex = solution.logId ? LogMapper.getLogIndex(LogMapper.getLog(solution.logId)?.timestamp || Date.now()) : -1;
+  return (                  {solution.variable} = {solution.value}            {solution.logId && (        Log Index: {logIndex}      )}      Steps:      {solution.steps.map((step, index) => (                  {index + 1}. {step}              ))}      {solution.warnings?.map((warning, index) => (                  Warning: {warning}              ))}      );};
+// Main component to integrate solver into an appexport const EquationSolver: React.FC = () => {  const [solution, setSolution] = useState<EquationSolution | null>(null);  const [error, setError] = useState('');
+  const handleSolve = async (equation: string, variable: string) => {    try {      const result = await EquationSolverCore.solveEquation(equation, {        variableToSolveFor: variable,      });      setSolution(result);      setError('');    } catch (err) {      setError(err.message);      setSolution(null);    }  };
+  return (                      );};
+// Styles for UI componentsconst styles = StyleSheet.create({  container: {    flex: 1,    padding: 20,    backgroundColor: '#f5f5f5',  },  inputContainer: {    marginBottom: 20,  },  input: {    borderWidth: 1,    borderColor: '#ccc',    padding: 10,    marginBottom: 10,    borderRadius: 5,    backgroundColor: '#fff',  },  solutionContainer: {    padding: 10,    backgroundColor: '#fff',    borderRadius: 5,    borderWidth: 1,    borderColor: '#ccc',  },  solutionText: {    fontSize: 18,    fontWeight: 'bold',    marginBottom: 10,  },  stepsTitle: {    fontSize: 16,    fontWeight: '600',    marginTop: 10,  },  stepText: {    fontSize: 14,    marginVertical: 2,  },  warningText: {    fontSize: 14,    color: '#d9534f',    marginTop: 5,  },  errorText: {    fontSize: 16,    color: '#d9534f',  },  statusText: {    fontSize: 14,    color: '#666',    marginBottom: 10,  },  logText: {    fontSize: 14,    color: '#666',    marginBottom: 10,  },});
+// Utility hook for integration into other appsexport const useEquationSolver = () => {  const solve = async (equation: string, variable: string, options: Partial = {}) => {    return EquationSolverCore.solveEquation(equation, {      variableToSolveFor: variable,      precision: options.precision ?? 6,      enableNotifications: options.enableNotifications ?? true,    });  };
+  return { solve, EquationInput, SolutionDisplay };};
+// Documentation/**
+
+Equation Solver Framework
+
+A reusable React Native module for solving algebraic equations with push notifications and linear log mapping.
+
+Installation:
+
+Install dependencies: npm install mathjs react-native expo-notifications
+
+
+
+Copy this file into your project.
+
+
+
+Configure expo-notifications in your app.json.
+
+
+
+Import and use EquationSolver or useEquationSolver in your app.
+
+
+
+Usage Example:
+
+
+
+import { EquationSolver, useEquationSolver } from './EquationSolverFramework';
+
+// Full component
+const App = () => ;
+
+// Custom integration
+const CustomApp = () => {
+const { solve, EquationInput, SolutionDisplay } = useEquationSolver();
+const [solution, setSolution] = useState<EquationSolution | null>(null);
+
+const handleSolve = async (equation: string, variable: string) => {
+const result = await solve(equation, variable);
+
+
+setSolution(result);
+
+
+};
+
+return (
+<View>
+
+
+  <EquationInput onSubmit={handleSolve} />
+
+
+  <SolutionDisplay solution={solution} />
+
+
+</View>
+
+
+);
+};
+
+
+
+
+Features:
+
+Solves linear equations (e.g., "40x3ap = 4mx3a*p" for m).
+
+
+
+Handles edge cases (e.g., identity equations).
+
+
+
+Provides step-by-step solutions.
+
+
+
+Push notifications for solutions.
+
+
+
+Linear mapping of solution logs.
+
+
+
+Customizable via SolverOptions.
+
+
+
+Extending the Framework:
+
+Add support for quadratic equations by extending EquationSolverCore.solveEquation.
+
+
+
+Integrate a math keyboard (e.g., MathQuill) in EquationInput.
+
+
+
+Enhance SolutionDisplay with LaTeX rendering using react-native-mathjax.
+
+
+
+Add log history viewer using LogMapper.getLog.
+
+
+
+Dependencies:
+
+mathjs: For equation parsing and solving.
+
+
+
+react-native: For UI components.
+
+
+
+expo-notifications: For push notifications. */
+
+
